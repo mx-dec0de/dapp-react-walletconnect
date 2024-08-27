@@ -1,57 +1,171 @@
 'use client';
 
-import React from 'react';
-import {
-  ThirdwebProvider,
-  ConnectWallet,
-  metamaskWallet,
-  walletConnect,
-} from "@thirdweb-dev/react";
-import { Polygon } from "@thirdweb-dev/chains";  // Импортируем объект сети Polygon
+import React, { useState, useEffect } from 'react';
+import { ThirdwebProvider, ConnectWallet, useAddress, useDisconnect } from "@thirdweb-dev/react";
+
+import { QueryClient, QueryClientProvider } from 'react-query';
+import { ethers } from 'ethers';
+import { appConfig } from '../app.config';
+
+const queryClient = new QueryClient();
+
 
 export default function HomePage() {
   return (
-    <AppWithProviders />
+    <QueryClientProvider client={queryClient}>
+      <ThirdwebProvider activeChain={appConfig.network} supportedChains={[appConfig.network]} clientId={appConfig.thirdWebClientId}>
+        <WalletApp />
+      </ThirdwebProvider>
+    </QueryClientProvider>
   );
 }
 
-function AppWithProviders() {
-  return (
-    <ThirdwebProvider
-      clientId="769dc6d5af32829444c9cbc76d834461"  // Ваш Project ID от thirdweb (обязательно!)
-      supportedWallets={[
-        metamaskWallet({ recommended: true,  wallet: "metamask",
-          connector: "injected", }),
-        walletConnect({
-          projectId: "c09195e9de8d63a40ec97d627cfd633c",  // Ваш Project ID для WalletConnect
-          wallet: "walletconnect",
-          connector: "walletconnect",
-          options: {
-            qrcode: true,
-            mobileLinks: ["trust", "metamask", "rainbow", "argent", "coinbase", "walletconnect"],
-          },
-        }),
-      ]}
-      activeChain={Polygon}  // Указываем активную сеть Polygon
-    >
-      <WalletApp />
-    </ThirdwebProvider>
-  );
+async function switchToNetwork() {
+  try {
+
+    await window.ethereum.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: appConfig.chainIdHexCode }],
+    })
+    console.log("Switched to " + appConfig.network.chainName)
+  } catch (switchError) {
+
+    if (switchError.code === 4902) {
+      try {
+        await window.ethereum.request({
+          method: 'wallet_addEthereumChain',
+          params: [appConfig.network]
+        });
+        console.log(appConfig.network.chainName +" added and switched");
+      } catch (addError) {
+        console.error("Failed to add the network", addError);
+      }
+    } else {
+      console.error("Failed to switch the network", switchError);
+    }
+  }
 }
+
 
 function WalletApp() {
+  const [gasBalance, setGasBalance] = useState(null);
+  const [uoaBalance, setUoaBalance] = useState(null);
+  const [userNetwork, setUserNetwork] = useState(null);
+  const [recipientAddress, setRecipientAddress] = useState('');
+  const [amountToSend, setAmountToSend] = useState('');
+  const [error, setError] = useState(null);
+  const address = useAddress();
+  const disconnect = useDisconnect();
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (address) {
+      setLoading(true); // Начало загрузки
+      switchToNetwork().then(fetchBalances).finally(() => setLoading(false));
+    }
+  }, [address]);
+
+  const fetchBalances = async () => {
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const network = await provider.getNetwork();
+
+      setUserNetwork(network);
+
+      if (network.chainId !== appConfig.network.chainId) {
+        throw new Error(`Connected to wrong network: ${network.chainId}. Please connect to the ${appConfig.network.name} network.`);
+      }
+
+      const balance = await provider.getBalance(address);
+      setGasBalance(ethers.utils.formatEther(balance));
+
+
+      const uoaContract = new ethers.Contract(appConfig.unitOfAccount.contract, appConfig.unitOfAccount.ABI, provider);
+      console.log(`Calling balanceOf for address: ${address} on contract ${appConfig.unitOfAccount.contract} on network ${appConfig.network.chainId}`);
+
+      const uoaBalanceRaw = await uoaContract.balanceOf(address);
+      setUoaBalance(ethers.utils.formatUnits(uoaBalanceRaw, appConfig.unitOfAccount.decimals)); 
+    } catch (err) {
+      console.error("Error fetching balances:", err);
+      setError(`Error fetching balances: ${err.message}`);
+    }
+  };
+
+  const handleSendTransaction = async () => {
+    try {
+      setError(null);
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer = provider.getSigner();
+      
+      const uoaContract = new ethers.Contract(appConfig.unitOfAccount.contract, appConfig.unitOfAccount.ABI, signer);
+      const tx = await uoaContract.transfer(recipientAddress, ethers.utils.parseUnits(amountToSend, 6));
+      await tx.wait();
+      fetchBalances(); 
+      alert("Transaction successful!");
+    } catch (err) {
+      console.error("Transaction failed:", err);
+      setError(`Transaction failed: ${err.message}`);
+    }
+  };
+
   return (
     <section className="section">
       <div className="container">
         <div className="content">
           <h1 className="title">Connect Your Wallet</h1>
 
-          {/* Компонент ConnectWallet для работы с Polygon */}
-          <ConnectWallet 
-            theme="dark"  // Темная тема
-            btnTitle="Connect Your Wallet"  // Текст кнопки
-            modalTitle="Select a Wallet"  // Текст в модальном окне
+          <ConnectWallet
+            theme="dark"
+            btnTitle="Connect Your Wallet"
+            modalTitle="Select a Wallet"
           />
+          {address && (
+            <button className="button is-danger" onClick={disconnect}>
+              Disconnect
+            </button>
+          )}
+          {address && (
+            <>
+              <p>Your {userNetwork ? userNetwork.name : 'Network'} Address:{address}</p>
+              <p>${appConfig.network.nativeCurrency.name} Balance: {gasBalance !== null ? `${gasBalance} ${appConfig.network.nativeCurrency.name}` : "Loading..."}</p>
+              <p>${appConfig.unitOfAccount.name} Balance: {uoaBalance !== null ? `${uoaBalance} ${appConfig.unitOfAccount.name}` : "Loading..."}</p>
+
+              <div>
+                <h2>Send {appConfig.unitOfAccount.name}</h2>
+                <div class="field">
+                  <label class="label">Recipient Address</label>
+                  <div class="control">
+                    <input 
+                      className="input" 
+                      type="text" 
+                      placeholder="Recipient Address" 
+                      value={recipientAddress} 
+                      onChange={(e) => setRecipientAddress(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="label">{`Amount ${appConfig.unitOfAccount.name}`}</label>
+                  <div class="control">
+                    <input 
+                      className="input" 
+                      type="text" 
+                      placeholder={`Amount ${appConfig.unitOfAccount.name}`}
+                      value={amountToSend}
+                      onChange={(e) => setAmountToSend(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <button className="button is-primary" onClick={handleSendTransaction}>
+                  Send ${appConfig.unitOfAccount.name}
+                </button>
+              </div>
+            </>
+          )}
+
+          {error && <p className="has-text-danger">{error}</p>}
+
+          
         </div>
       </div>
     </section>
