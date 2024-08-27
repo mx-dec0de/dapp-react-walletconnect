@@ -11,7 +11,6 @@ const UNIT_OF_ACCOUNT = {
 }
 
 
-
 export const appConfig = {
   unitOfAccount: UNIT_OF_ACCOUNT,
   network: Polygon, 
